@@ -4,6 +4,16 @@ from scipy import stats
 
 class TennisOddsSim:
     def __init__(self, df, p1_name, p2_name, p1_rank_points=-1, p2_rank_points=-1, data_range=(0, -1), n_sims=1000, treshold=10):
+        """
+        df: DataFrame with match outcomes
+        p1_name: first players name as used in df
+        p2_name: second players name as used in df
+        p1_rank_points, p1_rank_points: first and second players ranked points; 
+                                        if left at -1, the most recent one from the df will be used
+        data_range: used for historical comparisons; iloc
+        n_sims: number of simulations for the match
+        treshold: minimal number of historical matches for each player to try simulation
+        """
         df = df.iloc[data_range[0]:data_range[1]].copy()
         self.p1_name = p1_name
         self.p2_name = p2_name
@@ -13,16 +23,18 @@ class TennisOddsSim:
         self.n_sims = n_sims
         self.current_iteration = 0
         self.can_start = True
+        self.matches = []
         
+        # we need data for matches when each player won and lost
         p1w_df = df[df['winner_name'] == p1_name].copy()
         p1l_df = df[df['loser_name'] == p1_name].copy()
         p2w_df = df[df['winner_name'] == p2_name].copy()
         p2l_df = df[df['loser_name'] == p2_name].copy()
         
-        self.p1_df = self.merge_w_l(p1w_df, p1l_df) # indexes aren't reset after this, correct it
+        self.p1_df = self.merge_w_l(p1w_df, p1l_df)
         self.p2_df = self.merge_w_l(p2w_df, p2l_df)
         
-        
+        # check for rank points
         if p1_rank_points > 0:
             self.p1_rank_points = p1_rank_points
         elif len(self.p1_df) > 0:
@@ -45,6 +57,7 @@ class TennisOddsSim:
     
     def merge_w_l(self, win_df, loss_df):
         """
+        formatting and binding win and loss dataframes of a player
         win_df: DataFrame containting players winning matches
         loss_df: DataFrame containting players losing matches
         """
@@ -72,13 +85,16 @@ class TennisOddsSim:
                 cols[i] = oppid + cols[i][len(word):]
         player_df.columns = cols
         
+        # sort so that the most recent values are first
         player_df = player_df.sort_values(by='tourney_date').drop('tourney_date', axis=1).copy()
         self.to_relative(player_df)
         
         return player_df
     
-    
     def to_relative(self, data):
+        """
+        Normalize data
+        """
         data['p_ace'] = data['p_ace'] / data['p_svpt']
         data['p_df'] = data['p_df'] / (data['p_svpt'] - data['p_1stIn']) # fault given it's a second serve
         data['p_1stWon'] = data['p_1stWon'] / data['p_1stIn']
@@ -90,8 +106,9 @@ class TennisOddsSim:
         data['o_2ndWon'] = data['o_2ndWon'] / (data['o_svpt'] - data['o_1stIn'])
         data['o_bpSaved'] = data['o_bpSaved'] / data['o_bpFaced']
     
-    
-    def set_regressions(self, player_data, opp_rank_points):
+    # create regression for each player based on his performance against players
+    # where players rank points is the independent variable and various statistics dependant
+    def set_regressions(self, player_data):
         stat_regressions = {}
         stat_types = ['p_1stIn', 'p_df', 'p_ace', 'p_bpSaved', 'p_1stWon', 'p_2ndWon', 'o_bpSaved', 'o_1stWon', 'o_2ndWon']
         
@@ -108,7 +125,7 @@ class TennisOddsSim:
         return stat_regressions
     
     
-
+    # generate values for match simulation
     def get_values(self, reg, opp_rank_points):
         values = {}
         
@@ -120,28 +137,24 @@ class TennisOddsSim:
         return values
     
     def sim_match(self):
-        matches = [] # move this out to object
         p1 = self.get_values(self.p1_reg,self.p2_rank_points)
         p2 = self.get_values(self.p2_reg,self.p1_rank_points)
         match = TennisMatch([p1.copy(),p2.copy()])
         while match.status != 'end':
             match.generate_point()
-#         print(match.score)
-        matches += [match.score]
+        self.matches += [match.score]
         self.p1_won += 1 if match.p[0]['sets'] == 2 else 0
-        
-        # ADD THIS LATER!!!!
-#         total_sets += [match.p[0]['sets'] + match.p[1]['sets']]
-#         total_games += [match.total_games]
     
+    # use this method to start simulations
+    # if a key break occurs, you can continue from here
     def start(self):
         if self.can_start == False:
             return np.nan
         for i in range(self.n_sims):
-#             print(i) # remove this later
             self.current_iteration += 1
             self.sim_match()
     
+    # reset simulation to start from the first iteration
     def reset(self):
         self.current_iteration = 0
         self.p1_won = 0
@@ -152,7 +165,7 @@ class TennisMatch():
     Class used to track tennis match score
     """
     def __init__(self, players, verbose=False):
-        self.p = [{'sets': 0, 'games': 0, 'points':0}, {'sets': 0, 'games': 0, 'points':0}]
+        self.p = [{'sets': 0, 'games': 0, 'points':0}, {'sets': 0, 'games': 0, 'points':0}] # score tracking
         self.serve = 1
         self.status = 'game'
         self.bp = False
@@ -191,17 +204,22 @@ class TennisMatch():
             self.p[player]['games'] = 0
             self.p[-player + 1]['games'] = 0
             self.p[player]['sets'] += 1
+        
+        # chech if match over
         if self.p[player]['sets'] == 2:
             self.status = 'end'
             self.winner = player
     
     def generate_point(self):
+        # we first simulate to see if the player makes a fault on the serve
         if self.serve_result() == False:
             self.serve = 2
+            # player has made fault, attempt 2
             if self.serve_result() == False:
                 self.add_point(-self.player_serving + 1)
                 self.serve = 1
                 return
+        # simulate point winner and add it to the player
         if self.server_wins_point() == True:
             self.add_point(self.player_serving)
         else:
@@ -218,7 +236,9 @@ class TennisMatch():
         return odds > rand
     
     def serve_result(self):
-        rand = np.random.uniform()
+        # get odds depending on whether it's the first or second serve attempt
         serve = 'p_1stIn' if self.serve == 1 else 'p_df'
         odds = self.players[self.player_serving][serve]
+        # simulate serve outcome depending on RNG
+        rand = np.random.uniform()
         return odds > rand
